@@ -25,6 +25,8 @@
 // API_BASE_URL dans index.html pour pointer vers l'URL de ce serveur.
 // =============================================================================
 
+require('dotenv').config();
+
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -160,11 +162,7 @@ const MAINTENANCE_FILE = path.join(DATA_DIR, 'maintenance.json');
 const MAINTENANCE_PAR_DEFAUT = {
   active: false,
   message: 'Le site est actuellement en maintenance. Merci de repasser un peu plus tard.',
-  updatedAt: null,
-  scheduleActive: false,
-  scheduleStart: null,
-  scheduleEnd: null,
-  ipWhitelist: []
+  updatedAt: null
 };
 
 function ensureMaintenanceFile() {
@@ -187,19 +185,6 @@ function lireMaintenance() {
 
 function ecrireMaintenance(maintenance) {
   fs.writeFileSync(MAINTENANCE_FILE, JSON.stringify(maintenance, null, 2) + '\n', 'utf8');
-}
-
-// Détermine si la maintenance est effectivement active : soit le toggle
-// manuel est activé, soit une programmation (début/fin) est en cours.
-function maintenanceEstActive(maintenance) {
-  if (maintenance.active) return true;
-  if (maintenance.scheduleActive && maintenance.scheduleStart && maintenance.scheduleEnd) {
-    const maintenant = Date.now();
-    const debut = new Date(maintenance.scheduleStart).getTime();
-    const fin = new Date(maintenance.scheduleEnd).getTime();
-    if (!isNaN(debut) && !isNaN(fin) && maintenant >= debut && maintenant <= fin) return true;
-  }
-  return false;
 }
 
 // Page HTML renvoyée aux visiteurs tant que le mode maintenance est actif.
@@ -225,14 +210,7 @@ function pageMaintenanceHtml(message) {
     background: rgba(255,255,255,0.04); border: 1px solid rgba(56,189,248,0.25);
     border-radius: 18px; backdrop-filter: blur(14px); box-shadow: 0 0 40px rgba(56,189,248,0.1);
   }
-  .icon {
-    width: 64px; height: 64px; margin: 0 auto 18px;
-    display: flex; align-items: center; justify-content: center;
-    border-radius: 50%;
-    background: radial-gradient(circle at 30% 25%, rgba(56,189,248,0.28), rgba(56,189,248,0.08));
-    box-shadow: inset 0 0 0 1px rgba(56,189,248,0.3);
-  }
-  .icon svg { width: 30px; height: 30px; color: #38bdf8; }
+  .icon { font-size: 42px; margin-bottom: 18px; }
   h1 { font-size: 22px; margin: 0 0 14px; color: #fff; }
   p { font-size: 14.5px; line-height: 1.6; color: #9fb0c9; margin: 0; }
   .accent { color: #38bdf8; }
@@ -240,7 +218,7 @@ function pageMaintenanceHtml(message) {
 </head>
 <body>
   <div class="card">
-    <div class="icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+    <div class="icon">🛠️</div>
     <h1>Site en <span class="accent">maintenance</span></h1>
     <p>${messageSecurise}</p>
   </div>
@@ -547,16 +525,10 @@ app.use((req, res, next) => {
 // -----------------------------------------------------------------------------
 app.use((req, res, next) => {
   const maintenance = lireMaintenance();
-  if (!maintenanceEstActive(maintenance)) return next();
+  if (!maintenance.active) return next();
 
   const chemin = req.path || '';
   if (chemin === '/comptes.html' || chemin.startsWith('/api/')) {
-    return next();
-  }
-
-  const xffMaintenance = req.headers['x-forwarded-for'];
-  const ipClient = nettoyerIp(xffMaintenance ? String(xffMaintenance).split(',')[0].trim() : (req.ip || (req.socket && req.socket.remoteAddress) || ''));
-  if (Array.isArray(maintenance.ipWhitelist) && maintenance.ipWhitelist.includes(ipClient)) {
     return next();
   }
 
@@ -1395,42 +1367,6 @@ app.post('/api/promos/valider', (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// GET /api/notifications/stream (SSE)
-// Flux temps réel : chaque client connecté (index.html / index2.html) garde
-// cette connexion ouverte tant qu'il est sur le site. Dès qu'une notification
-// est envoyée depuis comptes.html, on la pousse instantanément à tous les
-// clients connectés (pas besoin d'attendre le prochain polling).
-// -----------------------------------------------------------------------------
-const notificationClients = new Set();
-
-function pousserNotificationATous(notification) {
-  const payload = `data: ${JSON.stringify(notification)}\n\n`;
-  for (const client of notificationClients) {
-    try { client.write(payload); } catch (e) { /* client déconnecté, ignoré */ }
-  }
-}
-
-app.get('/api/notifications/stream', (req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no'
-  });
-  res.write(': connecté\n\n');
-  notificationClients.add(res);
-
-  const keepAlive = setInterval(() => {
-    try { res.write(': ping\n\n'); } catch (e) { /* ignoré */ }
-  }, 25000);
-
-  req.on('close', () => {
-    clearInterval(keepAlive);
-    notificationClients.delete(res);
-  });
-});
-
-// -----------------------------------------------------------------------------
 // GET /api/notifications
 // Retourne l'historique des notifications globales envoyées (panneau admin).
 // -----------------------------------------------------------------------------
@@ -1470,7 +1406,6 @@ app.post('/api/notifications/broadcast', (req, res) => {
   };
   notifications.push(nouvelleNotification);
   ecrireNotifications(notifications);
-  pousserNotificationATous(nouvelleNotification);
   console.log(`[NOXO] Notification globale envoyée : ${nouvelleNotification.title}`);
   ajouterLog('notifications', 'info', `Notification envoyée à tous les comptes : ${nouvelleNotification.title}`);
   res.json({ success: true, notification: nouvelleNotification });
@@ -1486,20 +1421,8 @@ app.delete('/api/notifications/:id', (req, res) => {
   if (index === -1) {
     return res.status(404).json({ success: false, message: 'Notification introuvable.' });
   }
-  const supprimee = notifications[index];
   notifications.splice(index, 1);
   ecrireNotifications(notifications);
-  ajouterLog('notifications', 'info', `Notification supprimée de l'historique : ${supprimee.title}`);
-  res.json({ success: true });
-});
-
-// -----------------------------------------------------------------------------
-// DELETE /api/notifications
-// Supprime TOUT l'historique des notifications d'un coup.
-// -----------------------------------------------------------------------------
-app.delete('/api/notifications', (req, res) => {
-  ecrireNotifications([]);
-  ajouterLog('notifications', 'info', 'Historique des notifications entièrement vidé.');
   res.json({ success: true });
 });
 
@@ -1559,7 +1482,7 @@ app.put('/api/banners/:type', (req, res) => {
 // -----------------------------------------------------------------------------
 app.get('/api/maintenance-mode', (req, res) => {
   const maintenance = lireMaintenance();
-  res.json({ success: true, maintenance: { ...maintenance, effectiveActive: maintenanceEstActive(maintenance) } });
+  res.json({ success: true, maintenance });
 });
 
 // -----------------------------------------------------------------------------
@@ -1580,42 +1503,6 @@ app.post('/api/maintenance-mode', (req, res) => {
   ecrireMaintenance(maintenance);
   console.log(`[NOXO] Mode maintenance ${maintenance.active ? 'ACTIVÉ' : 'désactivé'}.`);
   ajouterLog('site', maintenance.active ? 'danger' : 'succes', `Mode maintenance ${maintenance.active ? 'activé — site bloqué' : 'désactivé'}`);
-  res.json({ success: true, maintenance });
-});
-
-// -----------------------------------------------------------------------------
-// POST /api/maintenance-schedule
-// Programme un début/fin automatique du mode maintenance. Body :
-// { scheduleActive, scheduleStart, scheduleEnd } (dates ISO).
-// -----------------------------------------------------------------------------
-app.post('/api/maintenance-schedule', (req, res) => {
-  const { scheduleActive, scheduleStart, scheduleEnd } = req.body || {};
-  const maintenance = lireMaintenance();
-  maintenance.scheduleActive = !!scheduleActive;
-  maintenance.scheduleStart = scheduleStart || null;
-  maintenance.scheduleEnd = scheduleEnd || null;
-  maintenance.updatedAt = new Date().toISOString();
-  ecrireMaintenance(maintenance);
-  ajouterLog('site', 'info', maintenance.scheduleActive
-    ? `Maintenance programmée du ${maintenance.scheduleStart} au ${maintenance.scheduleEnd}`
-    : 'Programmation de maintenance désactivée');
-  res.json({ success: true, maintenance });
-});
-
-// -----------------------------------------------------------------------------
-// POST /api/maintenance-whitelist
-// Enregistre la liste des IP autorisées à accéder au site même en
-// maintenance. Body : { ipWhitelist: string[] }.
-// -----------------------------------------------------------------------------
-app.post('/api/maintenance-whitelist', (req, res) => {
-  const { ipWhitelist } = req.body || {};
-  const maintenance = lireMaintenance();
-  maintenance.ipWhitelist = Array.isArray(ipWhitelist)
-    ? ipWhitelist.map((ip) => String(ip).trim()).filter(Boolean)
-    : [];
-  maintenance.updatedAt = new Date().toISOString();
-  ecrireMaintenance(maintenance);
-  ajouterLog('site', 'info', `Liste blanche IP maintenance mise à jour (${maintenance.ipWhitelist.length} adresse(s))`);
   res.json({ success: true, maintenance });
 });
 
