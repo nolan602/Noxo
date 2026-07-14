@@ -1,0 +1,22 @@
+{
+  "maintenance": {
+    "type": "maintenance",
+    "active": false,
+    "message": "",
+    "startTime": "",
+    "endTime": "",
+    "updatedAt": null
+  },
+  "promo": {
+    "type": "promo",
+    "active": false,
+    "message": "",
+    "updatedAt": null
+  },
+  "alerte": {
+    "type": "alerte",
+    "active": false,
+    "message": "",
+    "updatedAt": null
+  }
+}
